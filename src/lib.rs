@@ -163,6 +163,11 @@ async fn on_telegram_document(
     bot: Bot,
     file_id: String,
 ) -> eyre::Result<DocumentResult> {
+    let tg_api_key = config
+        .tg_api_key
+        .as_deref()
+        .ok_or_eyre("Telegram API key is not set")?;
+
     // Download file from Telegram
     let file = bot.inner().get_file(&GetFileParams { file_id }).await?;
     let file_path = file.result.file_path.ok_or_eyre("no file path found")?;
@@ -170,8 +175,7 @@ async fn on_telegram_document(
         .inner()
         .client
         .get(format!(
-            "https://api.telegram.org/file/bot{}/{file_path}",
-            config.tg_api_key
+            "https://api.telegram.org/file/bot{tg_api_key}/{file_path}",
         ))
         .send()
         .await?;
@@ -191,8 +195,12 @@ async fn on_webhook_import(
         .query_pairs()
         .find_map(|(k, v)| (k == "api_key").then(|| v.into_owned()));
 
-    if api_key.as_deref() != Some(config.webhook_api_key.as_str()) {
-        return Response::error("Unauthorized: Invalid or missing API key", 401);
+    let Some(webhook_api_key) = config.webhook_api_key.as_deref() else {
+        return Response::error("Webhook API key is not set", 401);
+    };
+
+    if api_key.as_deref() != Some(webhook_api_key) {
+        return Response::error("Invalid API key", 401);
     }
 
     let csv_bytes = req.bytes().await?;
