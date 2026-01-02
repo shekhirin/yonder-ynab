@@ -1,6 +1,6 @@
 target
 node_modules
 .wrangler
-.direnv
+.direnv/
 build
 dist
