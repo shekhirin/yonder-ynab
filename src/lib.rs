@@ -1,10 +1,10 @@
-use std::{io::Cursor, sync::Arc};
+use std::{fmt::Display, io::Cursor, sync::Arc};
 
 use chrono::NaiveDateTime;
 use eyre::{Context, OptionExt};
 use futures::TryFutureExt;
 use reqwest::header::HeaderMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tgbot_worker_rs::{
     frankenstein::{methods::GetFileParams, AsyncTelegramApi},
     App, Bot, BotError, Message,
@@ -78,15 +78,24 @@ enum YonderTransactionKind {
     Credit,
 }
 
+#[derive(Serialize)]
 struct DocumentResult {
     imported: usize,
     duplicates: usize,
 }
 
+impl Display for DocumentResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Imported new transactions: {}\nSkipped duplicate transactions: {}",
+            self.imported, self.duplicates
+        )
+    }
+}
+
 #[event(fetch)]
 pub async fn fetch(req: Request, env: Env, ctx: worker::Context) -> worker::Result<Response> {
-    let mut app = App::new();
-
     let config = init_config(&env)?;
 
     let ynab_client = ynab::Client::new_with_client(
@@ -101,18 +110,30 @@ pub async fn fetch(req: Request, env: Env, ctx: worker::Context) -> worker::Resu
     );
 
     let config = Arc::new(config);
+    let ynab_client = Arc::new(ynab_client);
 
-    app.on_message(move |bot, msg| {
-        on_message(config.clone(), ynab_client.clone(), bot, msg)
-            .map_err(|err| BotError::Custom(err.to_string()))
-    });
+    if req.path() == "/import" {
+        // Handle custom webhook
+        on_webhook_import(req, config, ynab_client).await
+    } else {
+        // Handle Telegram bot webhook
+        let mut app = App::new();
 
-    app.run(req, env, ctx).await
+        let config_clone = config.clone();
+        let ynab_client_clone = ynab_client.clone();
+
+        app.on_message(move |bot, msg| {
+            on_telegram_message(config_clone.clone(), ynab_client_clone.clone(), bot, msg)
+                .map_err(|err| BotError::Custom(err.to_string()))
+        });
+
+        app.run(req, env, ctx).await
+    }
 }
 
-async fn on_message(
+async fn on_telegram_message(
     config: Arc<Config>,
-    ynab_client: ynab::Client,
+    ynab_client: Arc<ynab::Client>,
     bot: Bot,
     msg: Message,
 ) -> eyre::Result<()> {
@@ -122,17 +143,8 @@ async fn on_message(
         return Ok(());
     };
 
-    match on_document(config, ynab_client, bot.clone(), document.file_id).await {
-        Ok(DocumentResult {
-            imported,
-            duplicates,
-        }) => {
-            bot.send_message(
-                msg.chat_id(),
-                &format!("Imported new transactions: {imported}\nSkipped duplicate transactions: {duplicates}"),
-            )
-            .await?
-        }
+    match on_telegram_document(config, ynab_client, bot.clone(), document.file_id).await {
+        Ok(result) => bot.send_message(msg.chat_id(), &result.to_string()).await?,
         Err(err) => {
             bot.send_message(
                 msg.chat_id(),
@@ -145,12 +157,13 @@ async fn on_message(
     Ok(())
 }
 
-async fn on_document(
+async fn on_telegram_document(
     config: Arc<Config>,
-    ynab_client: ynab::Client,
+    ynab_client: Arc<ynab::Client>,
     bot: Bot,
     file_id: String,
 ) -> eyre::Result<DocumentResult> {
+    // Download file from Telegram
     let file = bot.inner().get_file(&GetFileParams { file_id }).await?;
     let file_path = file.result.file_path.ok_or_eyre("no file path found")?;
     let file_response = bot
@@ -163,12 +176,46 @@ async fn on_document(
         .send()
         .await?;
 
+    let csv_bytes = file_response.bytes().await?;
+    import_yonder_csv_to_ynab(csv_bytes, &config, &ynab_client).await
+}
+
+/// Handle CSV import via HTTP webhook
+async fn on_webhook_import(
+    mut req: Request,
+    config: Arc<Config>,
+    ynab_client: Arc<ynab::Client>,
+) -> worker::Result<Response> {
+    let api_key = req
+        .url()?
+        .query_pairs()
+        .find_map(|(k, v)| (k == "api_key").then(|| v.into_owned()));
+
+    if api_key.as_deref() != Some(config.webhook_api_key.as_str()) {
+        return Response::error("Unauthorized: Invalid or missing API key", 401);
+    }
+
+    let csv_bytes = req.bytes().await?;
+    match import_yonder_csv_to_ynab(csv_bytes, &config, &ynab_client).await {
+        Ok(result) => Response::from_json(&serde_json::json!({"message": result.to_string()})),
+        Err(err) => Response::error(err.to_string(), 500),
+    }
+}
+
+/// Parse Yonder transacitons in CSV format and import to YNAB
+async fn import_yonder_csv_to_ynab(
+    yonder_csv: impl AsRef<[u8]>,
+    config: &Config,
+    ynab_client: &ynab::Client,
+) -> eyre::Result<DocumentResult> {
+    // Parse CSV with Yonder transactions
     let yonder_transactions: Vec<YonderTransaction> =
-        csv::Reader::from_reader(Cursor::new(file_response.bytes().await?))
+        csv::Reader::from_reader(Cursor::new(yonder_csv))
             .into_deserialize()
             .collect::<Result<_, _>>()
             .wrap_err("failed to deserialize as Yonder transactions CSV")?;
 
+    // Map Yonder transactions to YNAB format
     let ynab_transactions: Vec<_> = yonder_transactions
         .into_iter()
         .map(NewTransaction::from)
@@ -177,6 +224,8 @@ async fn on_document(
             transaction
         })
         .collect();
+
+    // Import transactions to YNAB
     let ynab_response = ynab_client
         .create_transaction(
             &config.ynab_budget_id,

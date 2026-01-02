@@ -16,6 +16,7 @@ progenitor = "0.11"
 progenitor-client = "0.11"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tgbot-worker-rs = { git = "https://github.com/xlfish233/tgbot-worker-rs" }
 uuid = { version = "1.0.0", features = ["serde", "v4", "js"] }
 worker = { version = "0.7", features = ['http', 'axum'] }

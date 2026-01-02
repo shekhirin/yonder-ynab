@@ -2471,6 +2471,7 @@ dependencies = [
  "progenitor-client",
  "reqwest",
  "serde",
+ "serde_json",
  "tgbot-worker-rs",
  "uuid",
  "worker",
