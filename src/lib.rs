@@ -131,6 +131,7 @@ pub async fn fetch(req: Request, env: Env, ctx: worker::Context) -> worker::Resu
     }
 }
 
+/// Handle Telegram message
 async fn on_telegram_message(
     config: Arc<Config>,
     ynab_client: Arc<ynab::Client>,
@@ -157,6 +158,7 @@ async fn on_telegram_message(
     Ok(())
 }
 
+/// Handle Telegram document
 async fn on_telegram_document(
     config: Arc<Config>,
     ynab_client: Arc<ynab::Client>,
