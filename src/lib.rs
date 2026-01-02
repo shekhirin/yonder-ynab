@@ -1,7 +1,7 @@
 use std::{io::Cursor, sync::Arc};
 
 use chrono::NaiveDateTime;
-use eyre::OptionExt;
+use eyre::{Context, OptionExt};
 use futures::TryFutureExt;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
@@ -9,10 +9,12 @@ use tgbot_worker_rs::{
     frankenstein::{methods::GetFileParams, AsyncTelegramApi},
     App, Bot, BotError, Message,
 };
-use uuid::Uuid;
-use worker::{event, Context, Env, Request, Response};
+use worker::{event, Env, Request, Response};
 
 use crate::ynab::types::{NewTransaction, PostTransactionsWrapper, TransactionClearedStatus};
+
+mod config;
+use config::{init_config, Config};
 
 mod ynab {
     progenitor::generate_api!(spec = "ynab_openapi.yml",);
@@ -82,72 +84,35 @@ struct DocumentResult {
 }
 
 #[event(fetch)]
-pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
+pub async fn fetch(req: Request, env: Env, ctx: worker::Context) -> worker::Result<Response> {
     let mut app = App::new();
 
-    let tg_api_key = Arc::new(env.secret("API_KEY")?.to_string());
-    let ynab_api_key = env.secret("YNAB_API_KEY")?.to_string();
-    let ynab_budget_id = env
-        .secret("YNAB_BUDGET_ID")
-        .map_or("last-used".to_string(), |secret| secret.to_string());
+    let config = init_config(&env)?;
 
     let ynab_client = ynab::Client::new_with_client(
         "https://api.ynab.com/v1",
         reqwest::ClientBuilder::new()
             .default_headers(HeaderMap::from_iter([(
                 reqwest::header::AUTHORIZATION,
-                format!("Bearer {ynab_api_key}").parse()?,
+                format!("Bearer {}", config.ynab_api_key).parse()?,
             )]))
             .build()
             .map_err(|err| worker::Error::RustError(err.to_string()))?,
     );
 
-    let accounts = ynab_client
-        .get_accounts(&ynab_budget_id, None)
-        .await
-        .map_err(|err| worker::Error::RustError(err.to_string()))?;
-    let ynab_account_id = accounts
-        .into_inner()
-        .data
-        .accounts
-        .into_iter()
-        .find(|account| account.name.eq_ignore_ascii_case("yonder"))
-        .map(|account| Ok(account.id))
-        .or_else(|| {
-            Some(
-                env.secret("YNAB_ACCOUNT_ID")
-                    .ok()?
-                    .to_string()
-                    .parse::<Uuid>()
-                    .map_err(|err| worker::Error::RustError(err.to_string())),
-            )
-        })
-        .transpose()?
-        .ok_or_else(|| {
-            worker::Error::RustError(
-                "No YNAB account ID is set. Either rename one of the accounts to \"Yonder\" or set the YNAB_ACCOUNT_ID secret."
-                    .to_string(),
-            )
-        })?;
+    let config = Arc::new(config);
 
     app.on_message(move |bot, msg| {
-        on_message(
-            tg_api_key.clone(),
-            ynab_client.clone(),
-            ynab_account_id,
-            bot,
-            msg,
-        )
-        .map_err(|err| BotError::Custom(err.to_string()))
+        on_message(config.clone(), ynab_client.clone(), bot, msg)
+            .map_err(|err| BotError::Custom(err.to_string()))
     });
 
     app.run(req, env, ctx).await
 }
 
 async fn on_message(
-    tg_api_key: Arc<String>,
+    config: Arc<Config>,
     ynab_client: ynab::Client,
-    ynab_account_id: Uuid,
     bot: Bot,
     msg: Message,
 ) -> eyre::Result<()> {
@@ -157,22 +122,14 @@ async fn on_message(
         return Ok(());
     };
 
-    match on_document(
-        tg_api_key,
-        ynab_client,
-        ynab_account_id,
-        bot.clone(),
-        document.file_id,
-    )
-    .await
-    {
+    match on_document(config, ynab_client, bot.clone(), document.file_id).await {
         Ok(DocumentResult {
             imported,
             duplicates,
         }) => {
             bot.send_message(
                 msg.chat_id(),
-                &format!("Imported transactions: {imported}\nSkipped duplicates: {duplicates}"),
+                &format!("Imported new transactions: {imported}\nSkipped duplicate transactions: {duplicates}"),
             )
             .await?
         }
@@ -189,9 +146,8 @@ async fn on_message(
 }
 
 async fn on_document(
-    tg_api_key: Arc<String>,
+    config: Arc<Config>,
     ynab_client: ynab::Client,
-    ynab_account_id: Uuid,
     bot: Bot,
     file_id: String,
 ) -> eyre::Result<DocumentResult> {
@@ -201,7 +157,8 @@ async fn on_document(
         .inner()
         .client
         .get(format!(
-            "https://api.telegram.org/file/bot{tg_api_key}/{file_path}"
+            "https://api.telegram.org/file/bot{}/{file_path}",
+            config.tg_api_key
         ))
         .send()
         .await?;
@@ -209,19 +166,20 @@ async fn on_document(
     let yonder_transactions: Vec<YonderTransaction> =
         csv::Reader::from_reader(Cursor::new(file_response.bytes().await?))
             .into_deserialize()
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .wrap_err("failed to deserialize as Yonder transactions CSV")?;
 
     let ynab_transactions: Vec<_> = yonder_transactions
         .into_iter()
         .map(NewTransaction::from)
         .map(|mut transaction| {
-            transaction.account_id = Some(ynab_account_id);
+            transaction.account_id = Some(config.ynab_account_id);
             transaction
         })
         .collect();
     let ynab_response = ynab_client
         .create_transaction(
-            "last-used",
+            &config.ynab_budget_id,
             &PostTransactionsWrapper {
                 transaction: None,
                 transactions: ynab_transactions,
