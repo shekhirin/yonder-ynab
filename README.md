@@ -112,7 +112,7 @@ After deployment, note your worker URL: `https://<worker-name>.<your-subdomain>.
 ### Install iOS shortcut
 
 1. Open the shortcut link from your iPhone: https://www.icloud.com/shortcuts/57b9b3c3c8ac4f98992027bc106ce47f
-2. Replace the worker domain in step 2 with your domain
+2. Replace the worker domain and API key with what you generated in the Setup phase
 3. Click on "Information" icon at the bottom
 4. Enable "Show in Share Sheet"
 
