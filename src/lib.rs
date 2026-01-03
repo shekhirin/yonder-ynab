@@ -42,14 +42,13 @@ struct YonderTransaction {
 
 impl From<YonderTransaction> for NewTransaction {
     fn from(value: YonderTransaction) -> Self {
+        let amount = (match value.kind {
+            YonderTransactionKind::Debit => -value.amount_gbp,
+            YonderTransactionKind::Credit => value.amount_gbp,
+        } * 1000.0) as i64;
         Self {
             account_id: None,
-            amount: Some(
-                (match value.kind {
-                    YonderTransactionKind::Debit => -value.amount_gbp,
-                    YonderTransactionKind::Credit => value.amount_gbp,
-                } * 1000.0) as i64,
-            ),
+            amount: Some(amount),
             approved: None,
             category_id: None,
             cleared: Some(TransactionClearedStatus::Cleared),
@@ -58,7 +57,7 @@ impl From<YonderTransaction> for NewTransaction {
             import_id: Some(
                 format!(
                     "TG:{}:{}",
-                    value.amount_gbp,
+                    amount,
                     value.date_time.and_utc().timestamp_millis()
                 )
                 .parse()
