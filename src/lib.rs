@@ -1,6 +1,6 @@
 use std::{fmt::Display, io::Cursor, sync::Arc};
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use eyre::{Context, OptionExt};
 use futures::TryFutureExt;
 use reqwest::header::HeaderMap;
@@ -23,7 +23,7 @@ mod ynab {
 #[derive(Debug, PartialEq, Deserialize)]
 struct YonderTransaction {
     #[serde(rename = "Date/Time of transaction")]
-    date_time: NaiveDateTime,
+    date_time: YonderTransactionDateTime,
     #[serde(rename = "Description")]
     description: String,
     #[serde(rename = "Amount (GBP)")]
@@ -46,22 +46,19 @@ impl From<YonderTransaction> for NewTransaction {
             YonderTransactionKind::Debit => -value.amount_gbp,
             YonderTransactionKind::Credit => value.amount_gbp,
         } * 1000.0) as i64;
+        let date_time = value.date_time.utc();
         Self {
             account_id: None,
             amount: Some(amount),
             approved: None,
             category_id: None,
             cleared: Some(TransactionClearedStatus::Cleared),
-            date: Some(value.date_time.and_utc().date_naive()),
+            date: Some(date_time.date_naive()),
             flag_color: None,
             import_id: Some(
-                format!(
-                    "TG:{}:{}",
-                    amount,
-                    value.date_time.and_utc().timestamp_millis()
-                )
-                .parse()
-                .unwrap(),
+                format!("TG:{}:{}", amount, date_time.timestamp_millis())
+                    .parse()
+                    .unwrap(),
             ),
             memo: None,
             payee_id: None,
@@ -72,8 +69,26 @@ impl From<YonderTransaction> for NewTransaction {
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
+#[serde(untagged)]
+enum YonderTransactionDateTime {
+    Naive(NaiveDateTime),
+    Utc(DateTime<Utc>),
+}
+
+impl YonderTransactionDateTime {
+    fn utc(self) -> DateTime<Utc> {
+        match self {
+            YonderTransactionDateTime::Naive(naive_date_time) => naive_date_time.and_utc(),
+            YonderTransactionDateTime::Utc(date_time) => date_time,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
 enum YonderTransactionKind {
+    #[serde(alias = "debit")]
     Debit,
+    #[serde(alias = "credit")]
     Credit,
 }
 
@@ -254,7 +269,10 @@ async fn import_yonder_csv_to_ynab(
 
 #[cfg(test)]
 mod tests {
-    use crate::{ynab::types::NewTransaction, YonderTransaction, YonderTransactionKind};
+    use crate::{
+        ynab::types::NewTransaction, YonderTransaction, YonderTransactionDateTime,
+        YonderTransactionKind,
+    };
 
     #[test]
     fn test_parse_yonder() -> eyre::Result<()> {
@@ -265,16 +283,32 @@ mod tests {
 
         assert_eq!(
             yonder_transactions,
-            vec![YonderTransaction {
-                date_time: "2026-01-01T10:34:50.211697".parse()?,
-                description: "TFL - Transport for London".to_string(),
-                amount_gbp: 3.00,
-                amount_charged: 3.00,
-                currency: "GBP".to_string(),
-                category: "Transport".to_string(),
-                kind: YonderTransactionKind::Debit,
-                country: "GBR".to_string()
-            }]
+            vec![
+                YonderTransaction {
+                    date_time: YonderTransactionDateTime::Naive(
+                        "2026-01-01T10:34:50.211697".parse()?
+                    ),
+                    description: "TFL - Transport for London".to_string(),
+                    amount_gbp: 3.00,
+                    amount_charged: 3.00,
+                    currency: "GBP".to_string(),
+                    category: "Transport".to_string(),
+                    kind: YonderTransactionKind::Debit,
+                    country: "GBR".to_string()
+                },
+                YonderTransaction {
+                    date_time: YonderTransactionDateTime::Utc(
+                        "2026-01-04T13:57:32.741647Z".parse()?
+                    ),
+                    description: "Deliveroo".to_string(),
+                    amount_gbp: 15.72,
+                    amount_charged: 15.72,
+                    currency: "GBP".to_string(),
+                    category: "Eating Out".to_string(),
+                    kind: YonderTransactionKind::Debit,
+                    country: "GBR".to_string()
+                }
+            ]
         );
 
         Ok(())
