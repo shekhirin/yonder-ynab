@@ -1,3 +1,3 @@
 "Date/Time of transaction","Description","Amount (GBP)","Amount (in Charged Currency)","Currency","Category","Debit or Credit","Country"
+"2026-01-01T10:34:50.211697Z","TFL - Transport for London","3","3","GBP","Transport","debit","GBR"
 "2026-01-01T10:34:50.211697","TFL - Transport for London","3.00","3.00","GBP","Transport","Debit","GBR"
-"2026-01-04T13:57:32.741647Z","Deliveroo","15.72","15.72","GBP","Eating Out","debit","GBR"

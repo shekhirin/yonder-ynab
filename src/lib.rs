@@ -17,10 +17,10 @@ mod config;
 use config::{init_config, Config};
 
 mod ynab {
-    progenitor::generate_api!(spec = "ynab_openapi.yml",);
+    progenitor::generate_api!(spec = "ynab_openapi.yml", derives = [PartialEq]);
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct YonderTransaction {
     #[serde(rename = "Date/Time of transaction")]
     date_time: YonderTransactionDateTime,
@@ -68,7 +68,7 @@ impl From<YonderTransaction> for NewTransaction {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 enum YonderTransactionDateTime {
     Naive(NaiveDateTime),
@@ -84,7 +84,7 @@ impl YonderTransactionDateTime {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 enum YonderTransactionKind {
     #[serde(alias = "debit")]
     Debit,
@@ -285,6 +285,18 @@ mod tests {
             yonder_transactions,
             vec![
                 YonderTransaction {
+                    date_time: YonderTransactionDateTime::Utc(
+                        "2026-01-01T10:34:50.211697Z".parse()?
+                    ),
+                    description: "TFL - Transport for London".to_string(),
+                    amount_gbp: 3.0,
+                    amount_charged: 3.0,
+                    currency: "GBP".to_string(),
+                    category: "Transport".to_string(),
+                    kind: YonderTransactionKind::Debit,
+                    country: "GBR".to_string()
+                },
+                YonderTransaction {
                     date_time: YonderTransactionDateTime::Naive(
                         "2026-01-01T10:34:50.211697".parse()?
                     ),
@@ -295,20 +307,13 @@ mod tests {
                     category: "Transport".to_string(),
                     kind: YonderTransactionKind::Debit,
                     country: "GBR".to_string()
-                },
-                YonderTransaction {
-                    date_time: YonderTransactionDateTime::Utc(
-                        "2026-01-04T13:57:32.741647Z".parse()?
-                    ),
-                    description: "Deliveroo".to_string(),
-                    amount_gbp: 15.72,
-                    amount_charged: 15.72,
-                    currency: "GBP".to_string(),
-                    category: "Eating Out".to_string(),
-                    kind: YonderTransactionKind::Debit,
-                    country: "GBR".to_string()
                 }
             ]
+        );
+
+        assert_eq!(
+            NewTransaction::from(yonder_transactions[0].clone()),
+            NewTransaction::from(yonder_transactions[1].clone())
         );
 
         Ok(())
